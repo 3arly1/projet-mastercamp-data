@@ -8,6 +8,7 @@ from email.mime.text import MIMEText
 from typing import List, Dict, Any
 import os
 import json
+import numpy as np
 
 # --- CONFIGURATION ---
 ANSSI_FEEDS = [
@@ -146,6 +147,104 @@ def consolidate_data():
     print(f"CSV consolidé écrit dans {CSV_OUTPUT}")
     return df
 
+# --- UTILITY FUNCTIONS ---
+def get_file_list(path: str) -> list:
+    """Returns a list of files in a directory."""
+    try:
+        return os.listdir(path)
+    except Exception as e:
+        print(f"Error reading directory {path}: {e}")
+        return []
+
+def parse_json_file(filepath: str) -> dict:
+    """Loads and returns JSON data from a file."""
+    try:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error reading file {filepath}: {e}")
+        return {}
+
+def extract_cve_info(data: dict, entry_id: str, entry_type: str, first_list: list, mitre_list: list, path: str) -> list:
+    """Extracts CVE info from a single alert/avis JSON."""
+    cve_list = []
+    for cve in data.get("cves", []):
+        cve_id = cve['name']
+        dico = {
+            'id': entry_id,
+            'title': '',
+            'type': entry_type,
+            'publication_date': None,
+            'cve_id': cve_id,
+            'original_link': None,
+            'epss': np.nan,
+            'description': None,
+            'cwe': 'Non disponible',
+            'cwe_desc': 'Non disponible',
+            'vendor': [],
+            'product': [],
+            'affected_versions': [],
+            'cvss': np.nan,
+            'severity': None
+        }
+        # Info from vendor_advisories (safe access)
+        vendor_advisories = data.get('vendor_advisories', [])
+        if vendor_advisories and isinstance(vendor_advisories, list):
+            vendor_adv = vendor_advisories[0]
+            dico['title'] = vendor_adv.get('title', '')
+            dico['publication_date'] = vendor_adv.get('published_at')
+            dico['original_link'] = vendor_adv.get('url')
+        # Info from first
+        if cve_id in first_list:
+            data_first = parse_json_file(os.path.join(path, "first", cve_id))
+            if data_first.get('data') and 'epss' in data_first['data'][0]:
+                dico['epss'] = data_first['data'][0]['epss']
+        # Info from mitre
+        if cve_id in mitre_list:
+            data_mitre = parse_json_file(os.path.join(path, "mitre", cve_id))
+            cna = data_mitre.get('containers', {}).get('cna', {})
+            if 'descriptions' in cna:
+                dico['description'] = cna['descriptions'][0].get('value')
+            # CWE
+            problemtype = cna.get('problemTypes', [{}])
+            if problemtype and 'descriptions' in problemtype[0]:
+                dico['cwe'] = problemtype[0]['descriptions'][0].get('cweId', 'Non disponible')
+                dico['cwe_desc'] = problemtype[0]['descriptions'][0].get('description', 'Non disponible')
+            # Affected products
+            for product in cna.get('affected', []):
+                if 'vendor' in product:
+                    dico['vendor'].append(product['vendor'])
+                if 'product' in product:
+                    dico['product'].append(product['product'])
+                if 'versions' in product:
+                    dico['affected_versions'] = [v["version"] for v in product["versions"] if v["status"] == "affected"]
+            # CVSS and severity
+            keys = ['cvssV3_0', 'cvssV3_1', 'cvssV2', 'cvssV4_0']
+            metrics = cna.get('metrics', [{}])
+            if metrics:
+                cvss_info = metrics[0]
+                for key in keys:
+                    if key in cvss_info:
+                        dico['cvss'] = cvss_info[key].get('baseScore', np.nan)
+                        dico['severity'] = cvss_info[key].get('baseSeverity')
+        cve_list.append(dico)
+    return cve_list
+
+def build_cve_list(base_path: str) -> list:
+    """Builds the consolidated CVE list from avis and alertes."""
+    avis_list = get_file_list(os.path.join(base_path, "Avis"))
+    alert_list = get_file_list(os.path.join(base_path, "alertes"))
+    mitre_list = get_file_list(os.path.join(base_path, "mitre"))
+    first_list = get_file_list(os.path.join(base_path, "first"))
+    cve_list = []
+    for avis_id in avis_list:
+        data = parse_json_file(os.path.join(base_path, "Avis", avis_id))
+        cve_list.extend(extract_cve_info(data, avis_id, 'Avis', first_list, mitre_list, base_path))
+    for alert_id in alert_list:
+        data = parse_json_file(os.path.join(base_path, "alertes", alert_id))
+        cve_list.extend(extract_cve_info(data, alert_id, 'Alerte', first_list, mitre_list, base_path))
+    return cve_list
+
 # --- STEP 6: Alert Generation and Email Notification ---
 def send_email(to_email, subject, body):
     from_email = "votre_email@gmail.com"
@@ -170,111 +269,17 @@ def generate_alerts_and_notify(df: pd.DataFrame, product_filter: str, email: str
             print(f"Envoi d'une alerte pour {row['Produit']} à {email}")
 
 
-# --- STEP X: Extract CVEs from local 'first' folder ---
-def extract_first_local(folder_path: str) -> pd.DataFrame:
-    print(f"Extraction des CVE depuis le dossier 'first' : {folder_path}")
-    records = []
-    for fname in os.listdir(folder_path):
-        fpath = os.path.join(folder_path, fname)
-        if os.path.isfile(fpath):
-            with open(fpath, 'r') as f:
-                try:
-                    data = json.load(f)
-                    for entry in data.get('data', []):
-                        entry['source'] = 'first'
-                        records.append(entry)
-                except Exception as e:
-                    print(f"Erreur lecture {fpath}: {e}")
-    print(f"Nombre de CVE extraits depuis 'first': {len(records)}")
-    return pd.DataFrame(records)
-
-# --- STEP X: Extract CVEs from local 'mitre' folder ---
-def extract_mitre_local(folder_path: str) -> pd.DataFrame:
-    print(f"Extraction des CVE depuis le dossier 'mitre' : {folder_path}")
-    records = []
-    for fname in os.listdir(folder_path):
-        fpath = os.path.join(folder_path, fname)
-        if os.path.isfile(fpath):
-            with open(fpath, 'r') as f:
-                try:
-                    data = json.load(f)
-                    meta = data.get('cveMetadata', {})
-                    cna = data.get('containers', {}).get('cna', {})
-                    record = {
-                        'cve': meta.get('cveId'),
-                        'state': meta.get('state'),
-                        'datePublished': meta.get('datePublished'),
-                        'description': cna.get('descriptions', [{}])[0].get('value'),
-                        'vendor': cna.get('affected', [{}])[0].get('vendor'),
-                        'product': cna.get('affected', [{}])[0].get('product'),
-                        'source': 'mitre'
-                    }
-                    records.append(record)
-                except Exception as e:
-                    print(f"Erreur lecture {fpath}: {e}")
-    print(f"Nombre de CVE extraits depuis 'mitre': {len(records)}")
-    return pd.DataFrame(records)
-
-# --- STEP X: Consolidate local enriched data (merge by CVE, keep all info) ---
-def consolidate_local_enriched_data(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
-    print("Fusion des données locales enrichies par CVE (structure complète)...")
-    columns = [
-        "ID ANSSI", "Titre ANSSI", "Type", "Date", "CVE", "CVSS", "Base Severity", "CWE", "CWE Description", "EPSS", "Lien", "Description", "Éditeur", "Produit", "Versions affectées"
-    ]
-    df = pd.concat([df1, df2], ignore_index=True)
-    if 'cve' in df.columns:
-        df['CVE'] = df['cve']
-    all_rows = []
-    for cve_id, group in df.groupby('CVE'):
-        row = {col: '' for col in columns}
-        row['CVE'] = str(cve_id) if cve_id is not None else ''
-        for col in columns:
-            values = group.get(col, pd.Series()).dropna().astype(str).replace('nan', '').replace('None', '').replace('', pd.NA).dropna().unique()
-            if len(values) == 0:
-                values = group.get(col.lower(), pd.Series()).dropna().astype(str).replace('nan', '').replace('None', '').replace('', pd.NA).dropna().unique()
-            if len(values) > 0:
-                row[col] = str(values[0]) if len(values) == 1 else ' | '.join([str(v) for v in values])
-        if not row['EPSS']:
-            values = group.get('epss', pd.Series()).dropna().astype(str).replace('nan', '').replace('None', '').replace('', pd.NA).dropna().unique()
-            if len(values) > 0:
-                row['EPSS'] = str(values[0]) if len(values) == 1 else ' | '.join([str(v) for v in values])
-        if not row['Description']:
-            values = group.get('description', pd.Series()).dropna().astype(str).replace('nan', '').replace('None', '').replace('', pd.NA).dropna().unique()
-            if len(values) > 0:
-                row['Description'] = str(values[0]) if len(values) == 1 else ' | '.join([str(v) for v in values])
-        if not row['Éditeur']:
-            values = group.get('vendor', pd.Series()).dropna().astype(str).replace('nan', '').replace('None', '').replace('', pd.NA).dropna().unique()
-            if len(values) > 0:
-                row['Éditeur'] = str(values[0]) if len(values) == 1 else ' | '.join([str(v) for v in values])
-        if not row['Produit']:
-            values = group.get('product', pd.Series()).dropna().astype(str).replace('nan', '').replace('None', '').replace('', pd.NA).dropna().unique()
-            if len(values) > 0:
-                row['Produit'] = str(values[0]) if len(values) == 1 else ' | '.join([str(v) for v in values])
-        if not row['Versions affectées']:
-            values = group.get('versions', pd.Series()).dropna().astype(str).replace('nan', '').replace('None', '').replace('', pd.NA).dropna().unique()
-            if len(values) > 0:
-                row['Versions affectées'] = str(values[0]) if len(values) == 1 else ' | '.join([str(v) for v in values])
-        all_rows.append(row)
-    print(f"Nombre total de CVE consolidés : {len(all_rows)}")
-    df_final = pd.DataFrame(all_rows, columns=columns)
-    return df_final
-
-# --- STEP X: Main function to process local enriched data ---
-def process_local_enriched_data(mitre_path: str, first_path: str) -> pd.DataFrame:
-    print("--- Début du traitement des données CVE locales déjà enrichies ---")
-    df_first = extract_first_local(first_path)
-    df_mitre = extract_mitre_local(mitre_path)
-    df = consolidate_local_enriched_data(df_first, df_mitre)
-    print(f"Total CVEs consolidés: {len(df)}")
-    print("--- Fin du traitement des données CVE locales déjà enrichies ---")
-    return df
 
 
 if __name__ == "__main__":
     # Utiliser la consolidation locale des données déjà enrichies à partir des dossiers mitre et first
-    mitre_path = "./data_pour_TD_final/mitre"
-    first_path = "./data_pour_TD_final/first"
-    df = process_local_enriched_data(mitre_path, first_path)
-    # Exemple d'alerte: notifier pour Apache
-    # generate_alerts_and_notify(df, "Apache", "destinataire@email.com")
-    print("Traitement terminé. Passez à l'analyse et la visualisation dans le notebook.")
+    base_path = os.path.join(os.getcwd(), "data_pour_TD_final")
+    cve_list = build_cve_list(base_path)
+    print(f"Nombre total de CVE consolidés : {len(cve_list)}")
+    # Afficher un exemple
+    if cve_list:
+        print("Exemple de CVE :", cve_list[0])
+    # Vous pouvez ensuite convertir en DataFrame ou exporter selon vos besoins
+    # df = pd.DataFrame(cve_list)
+    # df.to_csv("consolidated_all_cve.csv", index=False)
+    print("Traitement terminé avec les nouvelles fonctions.")
