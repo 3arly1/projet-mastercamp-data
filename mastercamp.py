@@ -12,7 +12,7 @@ ANSSI_FEEDS = [
     ("Avis", "https://www.cert.ssi.gouv.fr/avis/feed/"),
     ("Alerte", "https://www.cert.ssi.gouv.fr/alerte/feed/")
 ]
-RATE_LIMIT_SECONDS = 0.2
+RATE_LIMIT_SECONDS = 2
 CSV_OUTPUT = "consolidated_anssi_cve.csv"
 
 def extract_anssi_feeds() -> List[Dict[str, Any]]:
