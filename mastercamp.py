@@ -186,27 +186,53 @@ def consolidate_data(seen_cves=None):
 
 
 def send_email(to_email, subject, body):
-    from_email = "votre_email@gmail.com"
-    password = "mot_de_passe_application"
+    from_email = "laerec.agency@gmail.com"
+    password = "lgdy gwxl eyvr zlzc"
     msg = MIMEText(body)
     msg['From'] = from_email
     msg['To'] = to_email
     msg['Subject'] = subject
-    server = smtplib.SMTP('smtp.gmail.com', 587)
-    server.starttls()
-    server.login(from_email, password)
-    server.sendmail(from_email, to_email, msg.as_string())
-    server.quit()
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(from_email, password)
+        server.send_message(msg)
+        server.quit()
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"Erreur d'authentification SMTP : {e}. Vérifiez l'adresse email et le mot de passe (utilisez un App Password si 2FA est activée).")
+    except Exception as e:
+        print(f"Erreur lors de l'envoi de l'email : {e}")
 
-def generate_alerts_and_notify(df: pd.DataFrame, product_filter: str, email: str):
-    critical = df[(df['Base Severity'] == 'Critical') & (df['Produit'].str.contains(product_filter, na=False))]
-    if not critical.empty:
-        for _, row in critical.iterrows():
-            subject = f"Alerte CVE critique: {row['Produit']}"
-            body = f"CVE: {row['CVE']}\nDescription: {row['Description']}\nScore CVSS: {row['CVSS']}\nLien: {row['Lien']}"
-            send_email(email, subject, body)
-            print(f"Envoi d'une alerte pour {row['Produit']} à {email}")
-
+def generate_alerts_and_notify(df: pd.DataFrame, user_email: str, keywords: list):
+    """
+    For each new CVE, check if any keyword appears in the bulletin title, description, or product.
+    If yes, send an alert to the user's email with all useful information.
+    """
+    if df.empty or not keywords:
+        return
+    keywords_lower = [k.lower() for k in keywords]
+    for _, row in df.iterrows():
+        text_to_search = f"{row.get('Titre ANSSI','')} {row.get('Description','')} {row.get('Produit','')}".lower()
+        if any(kw in text_to_search for kw in keywords_lower):
+            subject = f"Alerte ANSSI: {row.get('Titre ANSSI','')}"
+            body = (
+                f"Type: {row.get('Type','')}\n"
+                f"Date: {row.get('Date','')}\n"
+                f"ID ANSSI: {row.get('ID ANSSI','')}\n"
+                f"CVE: {row.get('CVE','')}\n"
+                f"Score CVSS: {row.get('CVSS','')}\n"
+                f"Base Severity: {row.get('Base Severity','')}\n"
+                f"CWE: {row.get('CWE','')}\n"
+                f"CWE Description: {row.get('CWE Description','')}\n"
+                f"EPSS: {row.get('EPSS','')}\n"
+                f"Éditeur: {row.get('Éditeur','')}\n"
+                f"Produit: {row.get('Produit','')}\n"
+                f"Versions affectées: {row.get('Versions affectées','')}\n"
+                f"Lien: {row.get('Lien','')}\n"
+                f"Description: {row.get('Description','')}\n"
+            )
+            send_email(user_email, subject, body)
+            print(f"Envoi d'une alerte à {user_email} pour {row.get('ID ANSSI','')}")
 
 
 if __name__ == "__main__":
@@ -226,7 +252,7 @@ if __name__ == "__main__":
                 new_entries = new_cves - seen_cves
                 if new_entries:
                     print(f"Nouvelles CVE détectées : {new_entries}")
-                    generate_alerts_and_notify(df[df['CVE'].isin(new_entries)], "Windows", "camille.oden@efrei.net")
+                    generate_alerts_and_notify(df[df['CVE'].isin(new_entries)], "Emmanuel.Macron@president.net", ["vulnérabilité", "sécurité", "exploit", "attaque", "faille", "CVE", "vulnerability", "security", "exploit", "attack", "flaw"])
         except Exception as e:
             print(f"Erreur lors de la consolidation des données : {e}")
         print("Attente de 60 secondes avant la prochaine itération...")
