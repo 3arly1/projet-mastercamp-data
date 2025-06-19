@@ -1,3 +1,4 @@
+import os
 import feedparser
 import requests
 import re
@@ -6,7 +7,6 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from typing import List, Dict, Any
-
 # --- CONFIGURATION ---
 ANSSI_FEEDS = [
     ("Avis", "https://www.cert.ssi.gouv.fr/avis/feed/"),
@@ -104,16 +104,25 @@ def enrich_cve(cve_id: str) -> Dict[str, Any]:
     print(f"Enrichissement terminé pour {cve_id}")
     return cve_info
 
-def consolidate_data():
+def consolidate_data(seen_cves=None):
     print("Consolidation des données dans le DataFrame...")
     bulletins = extract_anssi_feeds()
+    # Reverse bulletins to process newest first
+    bulletins = bulletins[::-1]
     all_rows = []
+    stop_extraction = False
     for i, bulletin in enumerate(bulletins, 1):
+        if stop_extraction:
+            break
         print(f"Traitement du bulletin {i}/{len(bulletins)} : {bulletin['id_anssi']}")
         cves = extract_cves_from_bulletin(bulletin)
         for j, cve_entry in enumerate(cves, 1):
-            print(f"  Traitement de la CVE {j}/{len(cves)} pour ce bulletin...")
             cve_id = cve_entry["cve"]
+            if seen_cves is not None and cve_id in seen_cves:
+                print(f"  CVE déjà présente, arrêt de l'extraction : {cve_id}")
+                stop_extraction = True
+                break
+            print(f"  Traitement de la CVE {j}/{len(cves)} pour ce bulletin...")
             cve_info = enrich_cve(cve_id)
             row = {
                 "ID ANSSI": bulletin["id_anssi"],
@@ -134,8 +143,11 @@ def consolidate_data():
             }
             all_rows.append(row)
             time.sleep(RATE_LIMIT_SECONDS)
-    print(f"Nombre total de lignes consolidées : {len(all_rows)}")
+    print(f"\033[91mNombre total de lignes consolidées : {len(all_rows)}\033[0m")
     df = pd.DataFrame(all_rows)
+    if os.path.exists(CSV_OUTPUT):
+        df_old = pd.read_csv(CSV_OUTPUT)
+        df = pd.concat([df_old, df], ignore_index=True).drop_duplicates(subset=["CVE"])
     df.to_csv(CSV_OUTPUT, index=False)
     print(f"CSV consolidé écrit dans {CSV_OUTPUT}")
     return df
@@ -166,59 +178,23 @@ def generate_alerts_and_notify(df: pd.DataFrame, product_filter: str, email: str
 
 if __name__ == "__main__":
     print("Démarrage de la surveillance continue des flux ANSSI...")
-    seen_cves = set()
     while True:
+        print("\033[94miteration on the loop\033[0m")
         try:
-            # 1. Consolidate data from live ANSSI feeds (extract, enrich, consolidate)
-            bulletins = extract_anssi_feeds()
-            all_rows = []
-            for i, bulletin in enumerate(bulletins, 1):
-                print(f"Traitement du bulletin {i}/{len(bulletins)} : {bulletin['id_anssi']}")
-                cves = extract_cves_from_bulletin(bulletin)
-                for j, cve_entry in enumerate(cves, 1):
-                    cve_id = cve_entry["cve"]
-                    if cve_id in seen_cves:
-                        continue
-                    print(f"  Traitement de la CVE {j}/{len(cves)} pour ce bulletin...")
-                    cve_info = enrich_cve(cve_id)
-                    row = {
-                        "ID ANSSI": bulletin["id_anssi"],
-                        "Titre ANSSI": bulletin["titre_anssi"],
-                        "Type": bulletin["type"],
-                        "Date": bulletin["date"],
-                        "CVE": cve_id,
-                        "CVSS": cve_info["cvss"],
-                        "Base Severity": cve_info["base_severity"],
-                        "CWE": cve_info["cwe"],
-                        "CWE Description": cve_info["cwe_desc"],
-                        "EPSS": cve_info.get("epss"),
-                        "Lien": bulletin["link"],
-                        "Description": cve_info["description"],
-                        "Éditeur": cve_info["vendor"],
-                        "Produit": cve_info["product"],
-                        "Versions affectées": cve_info["versions"]
-                    }
-                    all_rows.append(row)
-                    seen_cves.add(cve_id)
-                    time.sleep(RATE_LIMIT_SECONDS)
-            if all_rows:
-                # Charger l'ancien CSV s'il existe, sinon créer un nouveau DataFrame
-                if os.path.exists(CSV_OUTPUT):
-                    df_old = pd.read_csv(CSV_OUTPUT)
-                    df_new = pd.DataFrame(all_rows)
-                    df = pd.concat([df_old, df_new], ignore_index=True).drop_duplicates(subset=["CVE"])
-                else:
-                    df = pd.DataFrame(all_rows)
-                df.to_csv(CSV_OUTPUT, index=False)
-                print(f"{len(all_rows)} nouveaux CVE ajoutés. CSV mis à jour.")
+            if os.path.exists(CSV_OUTPUT):
+                print(f"Fichier CSV existant trouvé : {CSV_OUTPUT}")
+                df_existing = pd.read_csv(CSV_OUTPUT)
+                seen_cves = set(df_existing['CVE'].unique())
             else:
-                print("Aucun nouveau CVE détecté.")
-            # 2. Optionally, build CVE list from local JSON data if needed
-            base_path = os.path.join(os.getcwd(), "data_pour_TD_final")
-            cve_list = build_cve_list(base_path)
-            print(f"Nombre total de CVE consolidés localement : {len(cve_list)}")
-            # 3. Optionally, generate alerts and send notifications
-            generate_alerts_and_notify(df, product_filter="Windows", email="camille.oden@efrei.net")
+                seen_cves = set()
+            df = consolidate_data(seen_cves=seen_cves)
+            new_cves = set(df['CVE'].unique())
+            if seen_cves:
+                new_entries = new_cves - seen_cves
+                if new_entries:
+                    print(f"Nouvelles CVE détectées : {new_entries}")
+                    generate_alerts_and_notify(df[df['CVE'].isin(new_entries)], "Windows", "camille.oden@efrei.net")
         except Exception as e:
-            print(f"Erreur dans la boucle principale : {e}")
-        time.sleep(RATE_LIMIT_SECONDS)
+            print(f"Erreur lors de la consolidation des données : {e}")
+        print("Attente de 60 secondes avant la prochaine itération...")
+        time.sleep(60)
