@@ -270,16 +270,61 @@ def generate_alerts_and_notify(df: pd.DataFrame, product_filter: str, email: str
 
 
 
-
 if __name__ == "__main__":
-    # Utiliser la consolidation locale des données déjà enrichies à partir des dossiers mitre et first
-    base_path = os.path.join(os.getcwd(), "data_pour_TD_final")
-    cve_list = build_cve_list(base_path)
-    print(f"Nombre total de CVE consolidés : {len(cve_list)}")
-    # Afficher un exemple
-    if cve_list:
-        print("Exemple de CVE :", cve_list[0])
-    # Vous pouvez ensuite convertir en DataFrame ou exporter selon vos besoins
-    # df = pd.DataFrame(cve_list)
-    # df.to_csv("consolidated_all_cve.csv", index=False)
-    print("Traitement terminé avec les nouvelles fonctions.")
+    print("Démarrage de la surveillance continue des flux ANSSI...")
+    seen_cves = set()
+    while True:
+        try:
+            # 1. Consolidate data from live ANSSI feeds (extract, enrich, consolidate)
+            bulletins = extract_anssi_feeds()
+            all_rows = []
+            for i, bulletin in enumerate(bulletins, 1):
+                print(f"Traitement du bulletin {i}/{len(bulletins)} : {bulletin['id_anssi']}")
+                cves = extract_cves_from_bulletin(bulletin)
+                for j, cve_entry in enumerate(cves, 1):
+                    cve_id = cve_entry["cve"]
+                    if cve_id in seen_cves:
+                        continue
+                    print(f"  Traitement de la CVE {j}/{len(cves)} pour ce bulletin...")
+                    cve_info = enrich_cve(cve_id)
+                    row = {
+                        "ID ANSSI": bulletin["id_anssi"],
+                        "Titre ANSSI": bulletin["titre_anssi"],
+                        "Type": bulletin["type"],
+                        "Date": bulletin["date"],
+                        "CVE": cve_id,
+                        "CVSS": cve_info["cvss"],
+                        "Base Severity": cve_info["base_severity"],
+                        "CWE": cve_info["cwe"],
+                        "CWE Description": cve_info["cwe_desc"],
+                        "EPSS": cve_info.get("epss"),
+                        "Lien": bulletin["link"],
+                        "Description": cve_info["description"],
+                        "Éditeur": cve_info["vendor"],
+                        "Produit": cve_info["product"],
+                        "Versions affectées": cve_info["versions"]
+                    }
+                    all_rows.append(row)
+                    seen_cves.add(cve_id)
+                    time.sleep(RATE_LIMIT_SECONDS)
+            if all_rows:
+                # Charger l'ancien CSV s'il existe, sinon créer un nouveau DataFrame
+                if os.path.exists(CSV_OUTPUT):
+                    df_old = pd.read_csv(CSV_OUTPUT)
+                    df_new = pd.DataFrame(all_rows)
+                    df = pd.concat([df_old, df_new], ignore_index=True).drop_duplicates(subset=["CVE"])
+                else:
+                    df = pd.DataFrame(all_rows)
+                df.to_csv(CSV_OUTPUT, index=False)
+                print(f"{len(all_rows)} nouveaux CVE ajoutés. CSV mis à jour.")
+            else:
+                print("Aucun nouveau CVE détecté.")
+            # 2. Optionally, build CVE list from local JSON data if needed
+            base_path = os.path.join(os.getcwd(), "data_pour_TD_final")
+            cve_list = build_cve_list(base_path)
+            print(f"Nombre total de CVE consolidés localement : {len(cve_list)}")
+            # 3. Optionally, generate alerts and send notifications
+            generate_alerts_and_notify(df, product_filter="Windows", email="camille.oden@efrei.net")
+        except Exception as e:
+            print(f"Erreur dans la boucle principale : {e}")
+        time.sleep(RATE_LIMIT_SECONDS)
