@@ -8,7 +8,7 @@ import smtplib
 from email.mime.text import MIMEText
 from typing import List, Dict, Any
 from dateutil import parser as dateparser
-# --- CONFIGURATION ---
+
 ANSSI_FEEDS = [
     ("Avis", "https://www.cert.ssi.gouv.fr/avis/feed/"),
     ("Alerte", "https://www.cert.ssi.gouv.fr/alerte/feed/")
@@ -48,7 +48,6 @@ def extract_cves_from_bulletin(bulletin: Dict[str, Any]) -> List[Dict[str, Any]]
         data = response.json()
         cves = data.get("cves", [])
         cve_list = [cve["name"] for cve in cves if "name" in cve]
-        # Fallback: regex extraction
         if not cve_list:
             cve_pattern = r"CVE-\\d{4}-\\d{4,7}"
             cve_list = list(set(re.findall(cve_pattern, str(data))))
@@ -60,7 +59,6 @@ def extract_cves_from_bulletin(bulletin: Dict[str, Any]) -> List[Dict[str, Any]]
 
 def enrich_cve(cve_id: str) -> Dict[str, Any]:
     print(f"Enrichissement des données pour la CVE : {cve_id}")
-    # MITRE CVE API
     mitre_url = f"https://cveawg.mitre.org/api/cve/{cve_id}"
     cve_info = {
         "cvss": None, "base_severity": None, "cwe": None, "cwe_desc": None,
@@ -71,7 +69,6 @@ def enrich_cve(cve_id: str) -> Dict[str, Any]:
         data = r.json()
         cna = data["containers"]["cna"]
         cve_info["description"] = cna["descriptions"][0]["value"] if cna.get("descriptions") else None
-        # CVSS
         metrics = cna.get("metrics", [])
         if metrics:
             for metric in metrics:
@@ -79,7 +76,6 @@ def enrich_cve(cve_id: str) -> Dict[str, Any]:
                     if key.startswith("cvssV3"):
                         cve_info["cvss"] = metric[key].get("baseScore")
                         cve_info["base_severity"] = metric[key].get("baseSeverity")
-        # CWE
         problemtype = cna.get("problemTypes", [])
         if problemtype and "descriptions" in problemtype[0]:
             cve_info["cwe"] = problemtype[0]["descriptions"][0].get("cweId", "Non disponible")
@@ -92,7 +88,6 @@ def enrich_cve(cve_id: str) -> Dict[str, Any]:
             cve_info["versions"] = ", ".join(versions) if versions else ""
     except Exception as e:
         print(f"Erreur enrichissement MITRE pour {cve_id}: {e}")
-    # EPSS API
     epss_url = f"https://api.first.org/data/v1/epss?cve={cve_id}"
     try:
         r = requests.get(epss_url, timeout=10)
@@ -110,7 +105,6 @@ def consolidate_data(seen_cves=None):
     print("Consolidation des données dans le DataFrame...")
     bulletins = extract_anssi_feeds()
 
-    # Conversion des dates texte en objets datetime
     for b in bulletins:
         try:
             b["parsed_date"] = dateparser.parse(b["date"])
@@ -118,7 +112,6 @@ def consolidate_data(seen_cves=None):
             print(f"Erreur lors du parsing de la date pour le bulletin {b['id_anssi']}: {e}")
             b["parsed_date"] = None
 
-    # Filtrage et tri chronologique (plus récent d'abord)
     valid_bulletins = [b for b in bulletins if b["parsed_date"] is not None]
     valid_bulletins.sort(key=lambda b: b["parsed_date"], reverse=True)
 
@@ -128,7 +121,6 @@ def consolidate_data(seen_cves=None):
 
     for i, bulletin in enumerate(valid_bulletins, 1):
         btype = bulletin['type']
-        # Skip if this category is already completed
         if btype == 'Avis' and stop_avis:
             continue
         if btype == 'Alerte' and stop_alerte:
@@ -141,7 +133,6 @@ def consolidate_data(seen_cves=None):
             cve_id = cve_entry["cve"]
             if seen_cves is not None and cve_id in seen_cves:
                 print(f"  CVE déjà présente dans {btype}, arrêt des {btype.lower()}...")
-                # Mark stop for this category and break inner loop
                 if btype == 'Avis':
                     stop_avis = True
                 else:
@@ -169,7 +160,7 @@ def consolidate_data(seen_cves=None):
             all_rows.append(row)
             time.sleep(RATE_LIMIT_SECONDS)
 
-        # Si les deux catégories sont terminées, on peut sortir complètement
+
         if stop_avis and stop_alerte:
             break
 
