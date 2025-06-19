@@ -252,7 +252,7 @@ if __name__ == "__main__":
                 new_entries = new_cves - seen_cves
                 if new_entries:
                     print(f"Nouvelles CVE détectées : {new_entries}")
-                    generate_alerts_and_notify(df[df['CVE'].isin(new_entries)], "maxime.musquin@efrei.net", ["vulnérabilité", "sécurité", "exploit", "attaque", "faille", "CVE", "vulnerability", "security", "exploit", "attack", "flaw"])
+                    generate_alerts_and_notify(df[df['CVE'].isin(new_entries)], "Emmanuel.Macron@president.net", ["vulnérabilité", "sécurité", "exploit", "attaque", "faille", "CVE", "vulnerability", "security", "exploit", "attack", "flaw"])
         except Exception as e:
             print(f"Erreur lors de la consolidation des données : {e}")
         print("Attente de 60 secondes avant la prochaine itération...")
