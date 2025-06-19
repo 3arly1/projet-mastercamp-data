@@ -7,6 +7,7 @@ import time
 import smtplib
 from email.mime.text import MIMEText
 from typing import List, Dict, Any
+from dateutil import parser as dateparser
 # --- CONFIGURATION ---
 ANSSI_FEEDS = [
     ("Avis", "https://www.cert.ssi.gouv.fr/avis/feed/"),
@@ -104,30 +105,54 @@ def enrich_cve(cve_id: str) -> Dict[str, Any]:
     print(f"Enrichissement terminé pour {cve_id}")
     return cve_info
 
+
 def consolidate_data(seen_cves=None):
     print("Consolidation des données dans le DataFrame...")
     bulletins = extract_anssi_feeds()
-    # Reverse bulletins to process newest first
-    bulletins = bulletins[::-1]
+
+    # Conversion des dates texte en objets datetime
+    for b in bulletins:
+        try:
+            b["parsed_date"] = dateparser.parse(b["date"])
+        except Exception as e:
+            print(f"Erreur lors du parsing de la date pour le bulletin {b['id_anssi']}: {e}")
+            b["parsed_date"] = None
+
+    # Filtrage et tri chronologique (plus récent d'abord)
+    valid_bulletins = [b for b in bulletins if b["parsed_date"] is not None]
+    valid_bulletins.sort(key=lambda b: b["parsed_date"], reverse=True)
+
     all_rows = []
-    stop_extraction = False
-    for i, bulletin in enumerate(bulletins, 1):
-        if stop_extraction:
-            break
-        print(f"Traitement du bulletin {i}/{len(bulletins)} : {bulletin['id_anssi']}")
+    stop_avis = False
+    stop_alerte = False
+
+    for i, bulletin in enumerate(valid_bulletins, 1):
+        btype = bulletin['type']
+        # Skip if this category is already completed
+        if btype == 'Avis' and stop_avis:
+            continue
+        if btype == 'Alerte' and stop_alerte:
+            continue
+
+        print(f"Traitement du bulletin {i}/{len(valid_bulletins)} : {bulletin['id_anssi']} ({btype})")
         cves = extract_cves_from_bulletin(bulletin)
+
         for j, cve_entry in enumerate(cves, 1):
             cve_id = cve_entry["cve"]
             if seen_cves is not None and cve_id in seen_cves:
-                print(f"  CVE déjà présente, arrêt de l'extraction : {cve_id}")
-                stop_extraction = True
+                print(f"  CVE déjà présente dans {btype}, arrêt des {btype.lower()}...")
+                # Mark stop for this category and break inner loop
+                if btype == 'Avis':
+                    stop_avis = True
+                else:
+                    stop_alerte = True
                 break
             print(f"  Traitement de la CVE {j}/{len(cves)} pour ce bulletin...")
             cve_info = enrich_cve(cve_id)
             row = {
                 "ID ANSSI": bulletin["id_anssi"],
                 "Titre ANSSI": bulletin["titre_anssi"],
-                "Type": bulletin["type"],
+                "Type": btype,
                 "Date": bulletin["date"],
                 "CVE": cve_id,
                 "CVSS": cve_info["cvss"],
@@ -143,14 +168,22 @@ def consolidate_data(seen_cves=None):
             }
             all_rows.append(row)
             time.sleep(RATE_LIMIT_SECONDS)
+
+        # Si les deux catégories sont terminées, on peut sortir complètement
+        if stop_avis and stop_alerte:
+            break
+
     print(f"\033[91mNombre total de lignes consolidées : {len(all_rows)}\033[0m")
     df = pd.DataFrame(all_rows)
+
     if os.path.exists(CSV_OUTPUT):
         df_old = pd.read_csv(CSV_OUTPUT)
         df = pd.concat([df_old, df], ignore_index=True).drop_duplicates(subset=["CVE"])
+
     df.to_csv(CSV_OUTPUT, index=False)
     print(f"CSV consolidé écrit dans {CSV_OUTPUT}")
     return df
+
 
 def send_email(to_email, subject, body):
     from_email = "votre_email@gmail.com"
